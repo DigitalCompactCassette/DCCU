@@ -1,18 +1,16 @@
-# DCCConv 3 #
+# DCCU #
 
-This project can be used to convert DCC-Studio .MPP files to .MP1 (MPEG 1 Layer 1), and vice versa.
+The DCC Utility (DCCU) can be used to convert DCC-Studio .MPP files to .MP1 (MPEG 1 Layer 1), or convert .MP1 files to MPP. Unlike its predecessor "DCCConv", it can convert in both directions, and it correctly supports files encoded at 32, 44.1 and 48 kHz (NOTE: DCC is limited to a bit rate of 384 kbps only).
 
-The program is intended to be used on Windows 98 but can be used on later versions of Windows too.
+The program is a command line tool intended to be used on Windows 98 or later. It doesn't work on Windows 3.x.
 
-# License #
-This software is Copyright (C) 2020 by the Digital Compact Cassette Development Team.
+Please refer to the other .md files in this directory for more documentation.
 
-It is licensed under the MIT License, which means you are allowed to use, distribute and modify it in any way you like, as long as you reproduce the above copyright. For more details, see the LICENSE file.
+# Quick Start
+Syntax:
 
-# Change Log #
-2020-01-23 Created.
+> DCCU inputfilename [inputfilename...]
 
-# TO DO #
-The current version of the software doesn't do anything. Everything is still to do!
+Every name on the command line is interpreted as an input file name. The program automatically generates the output file name by replacing the file name extension of the input file: MPP is converted to MP1 and MP1 is converted to MPP.
 
-If you want to contribute, feel free to do so. We welcome valid contributions in the form of Github pull requests.
+#### IMPORTANT: Read the USAGE.md file for important instructions on how to successfully convert a DCC-Studio track to MP1, and import a converted MP1 into DCC-Studio without crashing. ####
