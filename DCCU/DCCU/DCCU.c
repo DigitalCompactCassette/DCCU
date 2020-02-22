@@ -58,6 +58,7 @@ typedef enum
   ERR_DATA_NOT_MPEG1,                   // Input is not MPEG1
   ERR_DATA_NOT_LAYER1,                  // Input is not layer 1
   ERR_DATA_NOT_384KBPS,                 // Input is not 384 kbps
+  ERR_DATA_BAD_CHANMODE,                // Mono is not supported by DCC
   ERR_DATA_BAD_SAMPLERATE,              // Unsupported sample rate in input
   ERR_SAMPLERATE_MISMATCH,              // Input rate doesn't match output
   ERR_INPUT_FILE_NAME,                  // Input file name is invalid
@@ -85,8 +86,8 @@ typedef struct
   UINT              startindex;         // Index to start of frame
   UINT              endindex;           // Index to end of usable data
 
-  // When a valid frame of data is found in the input buffer, but it can't
-  // be processed yet, the following are set to the attributes of the frame.
+  // When a valid frame of data is found in the input buffer,
+  // the following are set to the attributes of the frame.
   RATEID            rateid;             // Sample rate
   size_t            framesize;          // Frame size
 
@@ -125,7 +126,7 @@ typedef struct
 // 1  bit  indicates 44.1kHz frame is padded              | or C4 (48)
 // 1  bit  private bit (ignored)                          / or C6 (32)
 //
-// 2  bits mode (00=stereo 01=joint 10=2ch 11=mono)(ign.) \
+// 2  bits mode (00=stereo 01=joint 10=2ch 11=res./mono)  \
 // 2  bits mode extension for joint stereo (ignored)      | Usually 0C
 // 1  bit  copyright protected (1=yes, 0=no) (ignored)    | or 00
 // 1  bit  original (1=original 0=copy) (ignored)         |
@@ -185,6 +186,16 @@ GetFrameSize(
     if ((frame[2] & 0xF0) != 0xC0)
     {
       result = ERR_DATA_NOT_384KBPS;
+    }
+  }
+
+  if (!result)
+  {
+    // The channel mode cannot be 11 binary (mono).
+    // DCC doesn't support mono, only dual mono.
+    if ((frame[3] & 0xC0) == 0xC0)
+    {
+      result = ERR_DATA_BAD_CHANMODE;
     }
   }
 
