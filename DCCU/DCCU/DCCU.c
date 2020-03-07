@@ -1,10 +1,13 @@
-/* DCC Utility */
+/* 
+  DCC Utility
+  (C) 2020 Jac Goudsmit
 
-/*
   This program converts MPP files from DCC-Studio to MP1 (MPEG 1 Layer 1)
   and vice versa.
 
   It was written as a console application for Windows 98.
+
+  Licensed under the MIT license. See the LICENSE file for licensing terms.
 */
 
 #include <windows.h>
@@ -34,7 +37,7 @@
 //
 // Do not change; these are used in MPP file headers and must correspond to
 // what DCC-Studio does.
-typedef enum
+typedef enum RATEID_t
 {
   RATEID_UNKNOWN = 0,                   // Used internally
   RATEID_32000 = 32,                    // 32 kHz
@@ -46,7 +49,7 @@ typedef enum
 
 //---------------------------------------------------------------------------
 // Enum type for error codes
-typedef enum
+typedef enum ERR_t
 {
   ERR_OK = 0,                           // No problem
   ERR_COMMAND,                          // Command line error
@@ -74,7 +77,7 @@ typedef enum
 
 //---------------------------------------------------------------------------
 // Struct type representing the input stream
-typedef struct
+typedef struct INPUTSTREAM_t
 {
   // Handle for file operations
   FILE             *fin;                // Input file handle
@@ -97,12 +100,15 @@ typedef struct
 } INPUTSTREAM, *HINPUTSTREAM;
 
 
-typedef struct 
+typedef struct OUTPUTSTREAM_t
 {
   CHAR              filename[MAX_PATH]; // File name for output
   FILE             *fout;               // Output file handle
+  FILE             *flvl;               // Level file handle
+  FILE             *ftrk;               // Track file handle
   BOOL              is_mpp;             // TRUE=MPP FALSE=MP1
   RATEID            rateid;             // Rate ID for MPP file
+  UINT32            numframes;          // Number of frames generated
 
 } OUTPUTSTREAM, *HOUTPUTSTREAM;
 
@@ -110,6 +116,160 @@ typedef struct
 /////////////////////////////////////////////////////////////////////////////
 // CODE
 /////////////////////////////////////////////////////////////////////////////
+
+
+//---------------------------------------------------------------------------
+// Get the extension of a file name
+//
+// Returns the location in the input string of the period in front of the
+// filename extension.
+//
+// If the name doesn't end in an extension, the function returns the location
+// of the end of the string.
+//
+// If the name includes a directory with a path with an extension, the
+// function handles this correctly.
+//
+// If the file name is NULL, the function returns NULL.
+LPCSTR                                  // Returns extension; NULL on error
+GetFileExtension(
+  LPCSTR filename,                      // Input file name
+  LPCSTR *pbasename)                    // Optional output base file name
+{
+  LPCSTR result = NULL;
+  LPCSTR basename = filename;
+
+  if (filename)
+  {
+    LPCSTR s;
+
+    for (s = filename; *s; s++)
+    {
+      if (*s == '.')
+      {
+        result = s;
+      }
+      else if ((*s == '\\') || (*s == '/') || (*s == ':'))
+      {
+        basename = s + 1;
+        result = NULL;
+      }
+    }
+
+    if (!result)
+    {
+      // If no period was found (or the last period appeared in front of
+      // a slash or backslash), return the end of the string
+      result = s;
+    }
+  }
+
+  if (pbasename)
+  {
+    *pbasename = basename;
+  }
+
+  return result;
+}
+
+
+//---------------------------------------------------------------------------
+// Replace the extension of a file if it matches
+//
+// Extension parameters to this function don't include the period.
+//
+// If the extension doesn't match, the input string is not copied to the
+// output buffer.
+BOOL                                    // Returns TRUE if replacement done
+ReplaceFileExtension(
+  LPCSTR filename,                      // Input filename
+  LPSTR outfilename,                    // Output filename (ok to use input)
+  LPCSTR matchext,                      // Input ext must be this (NULL=any)
+  LPCSTR replaceext)                    // Replace with this (NULL=no change)
+{
+  BOOL result = TRUE;
+  LPCSTR extension = NULL;
+  UINT32 baselen = 0;
+  BOOL haveperiod = FALSE;
+
+  if (result)
+  {
+    // Make sure we have an input filename
+    if ((!filename) || (!*filename) || (!outfilename))
+    {
+      result = FALSE;
+    }
+  }
+
+  if (result)
+  {
+    extension = GetFileExtension(filename, NULL);
+
+    if (!extension)
+    {
+      // Something went wrong
+      result = FALSE;
+    }
+  }
+
+  if (result)
+  {
+    // Move the extension pointer beyond the period if there is one
+    if (*extension == '.')
+    {
+      haveperiod = TRUE;
+      extension++;
+    }
+
+    baselen = extension - filename;
+
+    if (replaceext)
+    {
+      // If the replacement extension would make the output file too long,
+      // bail out
+      if (baselen + !haveperiod + strlen(replaceext) >= MAX_PATH)
+      {
+        result = FALSE;
+      }
+    }
+  }
+
+  if (result)
+  {
+    // If a match string was given, check if the extension matches
+    if (matchext)
+    {
+      result = !stricmp(extension, matchext);
+    }
+  }
+
+  if (result)
+  {
+    if (replaceext)
+    {
+      LPSTR dstex;
+
+      // Check if we need to copy the string to the output
+      if (filename != outfilename)
+      {
+        memcpy(outfilename, filename, baselen);
+      }
+
+      // Write a period if needed
+      dstex = outfilename + baselen;
+      if (!haveperiod)
+      {
+        *dstex++ = '.';
+      }
+
+      // Copy the replacement extension
+      // We already checked that there is enough space.
+      strcpy(dstex, replaceext); // Safe
+    }
+  }
+
+  return result;
+}
 
 
 //---------------------------------------------------------------------------
@@ -255,6 +415,88 @@ void outputstream_Destroy(
       fclose(hso->fout);
     }
 
+    if (hso->flvl)
+    {
+      static CHAR lvldata[MAX_PATH];
+      UINT32 u = hso->numframes;
+
+      // Use the file name as dummy data
+      strcpy(lvldata, hso->filename); // safe
+
+      for (;;)
+      {
+        UINT32 x = sizeof(lvldata) / 2; // number of frames in dummy pattern
+
+        if (u < x)
+        {
+          x = u;
+        }
+
+        if (!fwrite(lvldata, 2 * x, 1, hso->flvl)) // 2 bytes per frame
+        {
+          // TODO: Error
+          break;
+        }
+
+        if (!(u -= x))
+        {
+          break;
+        }
+      }
+
+      fclose(hso->flvl);
+    }
+
+    if (hso->ftrk)
+    {
+      LPCSTR basename;
+      LPCSTR extension = GetFileExtension(hso->filename, &basename);
+
+      if (extension)
+      {
+        UINT namelen = extension - basename;
+
+        if (namelen > 8)
+        {
+          // TODO: Warning, name is too long
+          //namelen = 8;
+        }
+
+        fprintf(hso->ftrk,
+          "A-IO"
+          "=5 Track{"
+            "%u \"%s\""                 // Artist name (length first)
+            "=5 Stack{"
+              "1 4 ["
+                "=8 Fragment{"
+                  "%u \"%.*s\""         // Filename (length first)
+                  "%u "                 // Number of frames
+                  "0 "                  // Skip this many frames at start?
+                "}"
+              "]"
+            "}"
+            "c1 {0 0 []}"
+            "%u "                       // sample rate ID
+            "%u \"%.*s\""               // Title (length first)
+            "%u "                       // Number of frames
+          "}",
+
+          4, "DCCU",                    // Artist name (TODO allow specifying from command line)
+          namelen, namelen, basename,   // File name
+          hso->numframes,               // Number of frames
+          hso->rateid,                  // Sample rate ID
+          namelen, namelen, basename,   // Title (TODO allow specifying from command line)
+          hso->numframes                // Number of frames
+        );
+      }
+      else
+      {
+        // TODO: Something went wrong parsing the file name. This shouldn't happen
+      }
+
+      fclose(hso->ftrk);
+    }
+
     free(hso);
   }
 }
@@ -292,6 +534,7 @@ outputstream_Create(
     strncpy_s(hs->filename, sizeof(hs->filename), filename, _TRUNCATE);
     hs->is_mpp = is_mpp;
     hs->rateid = RATEID_UNKNOWN;
+    hs->numframes = 0;
   }
 
   if (phso)
@@ -334,14 +577,14 @@ outputstream_ProcessFrame(
       else
       {
         // The file was opened successfully and we're at the start of it.
-        // If the file is in MPP format, write a header at the start of the file
         if (hso->is_mpp)
         {
+          // MPP files need a two byte header representing the sample
+          // frequency so that DCC-Studio can seek in the file
           BYTE header[2];
 
           header[0] = (BYTE)rateid;
           header[1] = 0;
-
 
           if (!fwrite(header, sizeof(header), 1, hso->fout))
           {
@@ -350,6 +593,17 @@ outputstream_ProcessFrame(
           else
           {
             hso->rateid = rateid;
+          }
+
+          // Generate a .TRK file too
+          if (ReplaceFileExtension(hso->filename, hso->filename, NULL, "TRK"))
+          {
+            hso->ftrk = fopen(hso->filename, "w");
+          }
+
+          if (ReplaceFileExtension(hso->filename, hso->filename, NULL, "LVL"))
+          {
+            hso->flvl = fopen(hso->filename, "wb");
           }
         }
       }
@@ -396,6 +650,14 @@ outputstream_ProcessFrame(
         }
       }
     }
+  }
+
+  if (!result)
+  {
+    // TODO: This could overflow but by the time that happens, DCC-Studio
+    // TODO:   probably won't be able to read the file anyway because of
+    // TODO:   other limitations such as a maximum file size of 2^32.
+    hso->numframes++;
   }
 
   return result;
@@ -694,6 +956,8 @@ ProcessFile(
     ERR inresult  = ERR_OK;
     ERR outresult = ERR_OK;
 
+    fprintf(stderr, "%s -> %s\n", infilename, outfilename);
+
     while ((!inresult) && (!outresult))
     {
       BOOL eof = FALSE;
@@ -747,21 +1011,31 @@ int main(int argc, char *argv[])
 
   fprintf(stderr, 
     "DCCU File Conversion Utility for DCC-Studio\n"
-    "Version 3.0\n"
-    "(C) 2020 Jac Goudsmit\n\n");
+    "Version 3.1\n"
+    "(C) 2020 Jac Goudsmit\n"
+    "Licensed under the MIT license.\n"
+    "\n");
 
   if (argc < 2)
   {
     fprintf(stderr, 
-      "Syntax: DCCU inputfile [inputfile...]\n"
-      "\n"
-      "This program converts MPP file (used by DCC-Studio) to MP1 (MPEG 1 Layer 1)\n"
+      "This program converts MPP files (used by DCC-Studio) to MP1 (MPEG 1 Layer 1)\n"
       "and vice versa.\n"
+      "\n"
+      "Syntax: DCCU inputfile [inputfile...]\n"
       "\n"
       "You can convert multiple files at a time by putting multiple file names on\n"
       "the command line. The output file name(s) is/are generated from the input\n"
       "file names by changing the file extension from \".MPP\" to \".MP1\" or\n"
-      "from \".MP1\" to \".MPP\".\n");
+      "from \".MP1\" to \".MPP\".\n"
+      "\n"
+      "When converting to .MPP, the program also generates a .LVL and a .TRK file.\n"
+      "Those are necessary to import the audio into the DCC-Studio. However,\n"
+      "because DCCU is not an MP1 decoder, it has to put dummy information into\n"
+      "the .LVL file. As a result is, you won't see the actual audio levels\n"
+      "in the DCC Studio wave editor unless you record the track to tape first,\n"
+      "and then copy it back to hard disk again.\n"
+      "\n");
 
     result = ERR_COMMAND;
   }
@@ -787,43 +1061,18 @@ int main(int argc, char *argv[])
 
       if (!loopresult)
       {
-        // Copy the input file name to the output file name buffer
-        // Check and change the file name extension first
-        LPCSTR extension = strrchr(inputfilename, '.');
-        LPCSTR newextension = NULL;
-
-        if (!extension)
+        if (ReplaceFileExtension(inputfilename, outputfilename, "MP1", "MPP"))
         {
-          // No file extension found
-          loopresult = ERR_INPUT_FILE_NAME;
+          output_is_mpp = TRUE;
+        }
+        else if (ReplaceFileExtension(inputfilename, outputfilename, "MPP", "MP1"))
+        {
+          // Nothing to do
         }
         else
         {
-          // Check if the extension matches one of the strings we know
-          if (!stricmp(extension, ".MP1"))
-          {
-            // From MP1 to MPP
-            output_is_mpp = TRUE;
-            newextension = ".MPP";
-          }
-          else if (!stricmp(extension, ".mpp"))
-          {
-            // From MPP to MP1
-            output_is_mpp = FALSE;
-            newextension = ".MP1";
-          }
-          else
-          {
-            // Not a known file extension
-            loopresult = ERR_INPUT_FILE_NAME;
-          }
-
-          // Compose the new file name if we can
-          if (newextension)
-          {
-            _snprintf_s(outputfilename, sizeof(outputfilename), _TRUNCATE,
-              "%.*s%s", extension - inputfilename, inputfilename, newextension);
-          }
+          // Filename extension not recognized
+          loopresult = ERR_INPUT_FILE_NAME;
         }
       }
 
