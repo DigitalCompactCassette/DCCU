@@ -6,22 +6,17 @@ The command syntax is as follows:
 
 > DCCU sourcefile [sourcefile...]
 
-Every file name on the command line is interpreted as a source file name. The name must end in ".MPP" or ".MP1". The program opens each file and creates an output file with the same base file name but a different extension: MPP is converted to MP1 and MP1 is converted to MPP.
-
-#### IMPORTANT: Please read the following instructions on how to successfully convert a track to MP1 and how to import a converted MPP file without crashing DCC-Studio. ####
+Every file name on the command line is interpreted as a source file name. The name must end in ".MPP" or ".MP1". The program opens each file and creates an output file with the same base file name but a different extension: MPP is converted to MP1 and MP1 is converted to MPP/LVL/TRK.
 
 # Importing an MP1 file into DCC-Studio #
 
-If you want to use an MP1 file with DCC-Studio, you will need to go through a few steps to convert it to a "trinity" of a .TRK file, an MPP file and a .LVL file. These extra steps won't be necessary in a future version of DCCU.
+1. Make sure the file you want to convert has only 8 characters in the base file name, and preferably no spaces or special characters. DCCU currently uses the input file name to generate the output file name but only changes the file extension; this can give problems because DCC-Studio is not capable of handling long file names. Also make sure the file name doesn't correspond to any existing .TRK or .LVL or .MPP files in the DCC-Studio audio directory.
+2. Use the DCCU program to convert the MP1 file that you want to record to tape, to MPP/LVL/TRK, using e.g. `DCCU FILENAME.MP1`.
+1. Either copy the MPP, LVL and TRK files to the DCC Studio audio directory (usually C:\STUDIO\AUDIO), or use the Import option from the Extra menu. The latter is slower but it will generate new non-conflicting file names and it will ask you for the new track name, artist name and track title.
 
-1. Open DCC-Studio and click the Extra>Options menu. Make sure the "Unused Audio Fragments" option is set to "Show at startup", and "Every 1 sessions" [sic]. Click OK. Then close DCC-Studio.
-1. Use the DCCU program to convert the MP1 file that you want to record to tape, to MPP. Keep in mind that DCC-Studio is a 16 bit program that doesn't understand long filenames. It uses "AF000000.MPP" (where 000000 is replaced by a number) for its own file names but you don't have to follow this pattern; however, 8-character file names (or less) are recommended so you don't have to figure out what the short filename is for your long file name.
-1. Copy the MPP file to the DCC Studio audio directory (usually C:\STUDIO\AUDIO).
-1. Without a .LVL file, DCC-Studio crashes if you want to open your file. To prevent this, you can reuse an existing .LVL file but it must have enough data in it. A .LVL file that belongs to an entire (side of) a tape will do fine. In the DCC-Studio audio directory, search for the largest file with an LVL extension and make a copy so that the copy has a base file name that matches your MPP file.
-1. Open DCC-Studio. It will tell you that it found unused audio fragments. Select your file and click "Create track".
-1. Then it will ask for a file name for the .TRK file which it will generate. You can also enter the track title and artist name here.
+#### Please note: If you open the track file in an edit window, the wave form will not reflect the actual audio. This is normal and cannot be fixed unless MP1 decoding is added to the DCCU application.
 
-Now you can use the newly imported track the same way as you would use other DCC-Studio tracks. However, the wave form that's shown in the editor won't match the actual sound. You can record the file to tape and then re-record it to hard disk to get a copy (and the copy will be exact: the DCC recorder doesn't make a change to it). Once DCC-Studio reads the wave from tape, the waveform on the screen will match what you hear.
+The audio is correct and can be played, edited and recorded to tape as usual. If you want, you can record the audio to tape and then copy it back to hard disk to get an accurate waveform representation. Copying to tape and then back to hard disk will not result in loss of quality.
 
 # Creating an MP1 File from a DCC-Studio Audio Track #
 

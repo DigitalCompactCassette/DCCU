@@ -11,6 +11,6 @@ Syntax:
 
 > DCCU inputfilename [inputfilename...]
 
-Every name on the command line is interpreted as an input file name. The program automatically generates the output file name by replacing the file name extension of the input file: MPP is converted to MP1 and MP1 is converted to MPP.
+Every name on the command line is interpreted as an input file name. The program automatically generates the output file name by replacing the file name extension of the input file: MPP is converted to MP1 and MP1 is converted to MPP/LVL/TRK.
 
-#### IMPORTANT: Read the USAGE.md file for important instructions on how to successfully convert a DCC-Studio track to MP1, and import a converted MP1 into DCC-Studio without crashing. ####
+#### Read the [USAGE.md](USAGE.md) file for further instructions. ####
