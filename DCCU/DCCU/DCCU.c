@@ -33,6 +33,14 @@
 
 
 //---------------------------------------------------------------------------
+// Types that evidently don't exist in early versions of the Windows SDK
+#ifndef _LPCBYTE_DEFINED
+#define _LPCBYTE_DEFINED
+typedef const BYTE *LPCBYTE;
+#endif
+
+
+//---------------------------------------------------------------------------
 // Enum type that corresponds to DCC-Studio file header value
 //
 // Do not change; these are used in MPP file headers and must correspond to
@@ -531,7 +539,7 @@ outputstream_Create(
 
   if (!result)
   {
-    strncpy_s(hs->filename, sizeof(hs->filename), filename, _TRUNCATE);
+    strncpy(hs->filename, filename, sizeof(hs->filename) - 1); // safe; buffer is filled with \0
     hs->is_mpp = is_mpp;
     hs->rateid = RATEID_UNKNOWN;
     hs->numframes = 0;
@@ -972,11 +980,19 @@ ProcessFile(
 
       for (;;)
       {
+        static UINT32 timestamp;
+
         outresult = inputstream_CopyFrame(hsi, hso);
         if (outresult == ERR_INSUFFICIENT_DATA)
         {
           outresult = ERR_OK;
           break;
+        }
+
+        if (GetTickCount() - timestamp > 1000)
+        {
+          timestamp = GetTickCount();
+          fprintf(stderr, "%u frame%s\r", hso->numframes, (hso->numframes == 1 ? "" : "s"));
         }
       }
 
@@ -985,6 +1001,8 @@ ProcessFile(
         break;
       }
     }
+
+    fprintf(stderr, "%u frame%s DONE\n", hso->numframes, (hso->numframes == 1 ? "" : "s"));
 
     if (inresult)
     {
@@ -1011,7 +1029,7 @@ int main(int argc, char *argv[])
 
   fprintf(stderr, 
     "DCCU File Conversion Utility for DCC-Studio\n"
-    "Version 3.1\n"
+    "Version 3.2\n"
     "(C) 2020 Jac Goudsmit\n"
     "Licensed under the MIT license.\n"
     "\n");
