@@ -1,6 +1,6 @@
 /* 
   DCC Utility
-  (C) 2020 Jac Goudsmit
+  (C) 2020-2022 Jac Goudsmit
 
   This program converts MPP files from DCC-Studio to MP1 (MPEG 1 Layer 1)
   and vice versa.
@@ -21,8 +21,8 @@
 /////////////////////////////////////////////////////////////////////////////
 
 
-// The buffer sizes need to be at least the size of the largest possible
-// frame size.
+// These buffer sizes can basically be anything but need to be at least the
+// size of the largest possible frame size.
 #define INPUT_BUFFER_SIZE (48000)       // One second of MP1 data
 #define OUTPUT_BUFFER_SIZE (48000)      // Same as input buffer size
 
@@ -102,6 +102,9 @@ typedef struct INPUTSTREAM_t
   RATEID            rateid;             // Sample rate
   size_t            framesize;          // Frame size
 
+  // Statistics
+  UINT              numpaddingslots;    // Number of nozero padding slots
+
   // The actual buffer follows the struct once it's allocated.
   UINT              buffersize;         // Number of bytes in buffer
   BYTE              buffer[0];          // Input buffer follows struct
@@ -110,7 +113,7 @@ typedef struct INPUTSTREAM_t
 
 typedef struct OUTPUTSTREAM_t
 {
-  CHAR              filename[MAX_PATH]; // File name for output
+  CHAR              outname[MAX_PATH];  // File name for output
   FILE             *fout;               // Output file handle
   FILE             *flvl;               // Level file handle
   FILE             *ftrk;               // Track file handle
@@ -284,35 +287,49 @@ ReplaceFileExtension(
 // Determine MPEG-1 Layer 1 frame size based on header
 //
 // The frame must start with:
-// 12 bits sync word 0xFFF                                \
-// 1  bit  ID (1=MPEG)                                    | FF FF
-// 2  bits layer (binary 11 for layer 1)                  |
-// 1  bit  protection (=CRC added) (1=no)(ignored)        /
+// Index 0:
+// 8  bits sync (binary 11111111)                         - FF
 //
+// Index 1:
+// 4  bits sync (binary 1111)                             \
+// 1  bit  ID (1=MPEG)                                    | FF or FE
+// 2  bits layer (binary 11 for layer 1)                  |
+// 1  bit  protection (=CRC added after header) (1=no)    /
+//
+// Index 2:
 // 4  bits bit rate (1100 = 384kbps for layer 1)          \
 // 2  bits sample freq (00=44kHz 01=48kHz 10=32kHz 11=res)| C0/C2 (44.1)
 // 1  bit  indicates 44.1kHz frame is padded              | or C4 (48)
 // 1  bit  private bit (ignored)                          / or C6 (32)
 //
+// Index 3:
 // 2  bits mode (00=stereo 01=joint 10=2ch 11=res./mono)  \
 // 2  bits mode extension for joint stereo (ignored)      | Usually 0C
 // 1  bit  copyright protected (1=yes, 0=no) (ignored)    | or 00
 // 1  bit  original (1=original 0=copy) (ignored)         |
 // 2  bits emphasis (00=none 01=50/15us 10=res. 11=CCITT) /
+//
+// The total size of the frame including the header is
+// (48 * 384000 / samplerate). For 44.1 kHz this doesn't yield an integer
+// result, so some frames have 4 bytes extra data based on header[2] bit 2.
 ERR                                     // Returns error code
 GetFrameSize(
   PBYTE frame,                          // Pointer to start of frame
   UINT insize,                          // Number of available bytes
   PUINT pframesize,                     // Output required frame size
+  PUINT pskipsize,                      // Output amount of input to skip
   RATEID *prateid)                      // Output sample rate enum
 {
   ERR result = ERR_OK;
   UINT framesize = 0;
+  UINT skipsize = 0;
   RATEID rateid = RATEID_UNKNOWN;
 
   if (!result)
   {
     // The header must be at least 4 bytes
+    //
+    // If there's less data, read more from the input file.
     if (insize < 4)
     {
       result = ERR_INSUFFICIENT_DATA;
@@ -321,54 +338,102 @@ GetFrameSize(
 
   if (!result)
   {
+    // Check that frame[0] == 0b11111111
+    //
     // The header must start with a sync word
-    if ((frame[0] != 0xFF) || ((frame[1] & 0xF0) != 0xF0))
+    if (frame[0] != 0xFF)
     {
+      // Optimization: Look for an 0xFF byte in the rest of the buffer
+      for (skipsize = 1; skipsize < insize; skipsize++)
+      {
+        if (frame[skipsize] == 0xFF)
+        {
+          break;
+        }
+      }
+
       result = ERR_SYNC;
     }
   }
 
   if (!result)
   {
-    // We can only do MPEG 1
-    if ((frame[1] & 0x8) != 0x8)
+    // Check that frame[1] == 0b1111xxxx
+    //
+    // The header must start with a sync word
+    if ((frame[1] & 0xF0) != 0xF0)
     {
+      skipsize = 2;
+      result = ERR_SYNC;
+    }
+  }
+
+  if (!result)
+  {
+    // Check that frame[1] == 0bxxxx1xxx
+    //
+    // We can only do MPEG 1
+    if ((frame[1] & 0x08) != 0x08)
+    {
+      skipsize = 2;
       result = ERR_DATA_NOT_MPEG1;
     }
   }
 
   if (!result)
   {
+    // Check that frame[1] == 0bxxxxx11x
+    //
     // We can only do layer 1
     if ((frame[1] & 0x6) != 0x6)
     {
+      skipsize = 2;
       result = ERR_DATA_NOT_LAYER1;
     }
   }
 
+  // frame[1] bit 0 indicates whether a CRC follows the header (0) or not (1)
+  // We deal with that while copying the frame.
+
   if (!result)
   {
-    // (frame[1] & 0x1) ignored (private bit)
-
+    // Check that frame[2] == 0b1100xxxx
+    //
     // The bit rate must be 384kbps
     if ((frame[2] & 0xF0) != 0xC0)
     {
+      skipsize = 3;
       result = ERR_DATA_NOT_384KBPS;
     }
   }
 
+  // frame[2] bits 3-2 are the sample frequency, we'll get to those below.
+  // frame[2] bit  1 is the padding bit, also handled below.
+  // frame[2] bit  0 is the user bit and is ignored.
+
   if (!result)
   {
+    // Check that frame[3] == 0b11xxxxxx
+    //
     // The channel mode cannot be 11 binary (mono).
-    // DCC doesn't support mono, only dual mono.
+    // DCC doesn't support mono, only dual mono on prerecorded cassettes.
+    // TODO: We could change mono mode to stereo by duplicating the data.
     if ((frame[3] & 0xC0) == 0xC0)
     {
+      skipsize = 4; // TODO: Could skip (48 * 384000 / samplerate) / 2 ???
       result = ERR_DATA_BAD_CHANMODE;
     }
   }
 
+  // frame[3] bits 5-4 are used for joint stereo encoding
+  // frame[3] bit  3 is copyright. TODO: Allow setting/clearing?
+  // frame[3] bit  2 is the copied-flag. TODO: Allow setting/clearing?
+  // frame[3] bits 1-0 are used for emphasis
+
   if (!result)
   {
+    // Evaluate frame[2] bits 3-2 (sample rate) and bit 1 (padding)
+    //
     // The frame size in bytes is 48 * 384000 / samplerate according to the
     // standard.
     //
@@ -378,7 +443,7 @@ GetFrameSize(
     {
     case 0x00:
       rateid = RATEID_44100;
-      framesize = 416 + 4 * ((frame[2] & 0x2) != 0); // padding bit used only here
+      framesize = 416 + 4 * ((frame[2] & 0x2) != 0); // Padding is only used at 44.1.
       break;
 
     case 0x04:
@@ -407,6 +472,11 @@ GetFrameSize(
     *pframesize = framesize;
   }
 
+  if (pskipsize)
+  {
+    *pskipsize = skipsize;
+  }
+
   return result;
 }
 
@@ -429,7 +499,7 @@ void outputstream_Destroy(
       UINT32 u = hso->numframes;
 
       // Use the file name as dummy data
-      strcpy(lvldata, hso->filename); // safe
+      strcpy(lvldata, hso->outname); // safe
 
       for (;;)
       {
@@ -458,7 +528,7 @@ void outputstream_Destroy(
     if (hso->ftrk)
     {
       LPCSTR basename;
-      LPCSTR extension = GetFileExtension(hso->filename, &basename);
+      LPCSTR extension = GetFileExtension(hso->outname, &basename);
 
       if (extension)
       {
@@ -539,7 +609,7 @@ outputstream_Create(
 
   if (!result)
   {
-    strncpy(hs->filename, filename, sizeof(hs->filename) - 1); // safe; buffer is filled with \0
+    strncpy(hs->outname, filename, sizeof(hs->outname) - 1); // safe; buffer is filled with \0
     hs->is_mpp = is_mpp;
     hs->rateid = RATEID_UNKNOWN;
     hs->numframes = 0;
@@ -578,7 +648,7 @@ outputstream_ProcessFrame(
     // If the file isn't open yet, open it now
     if (!hso->fout)
     {
-      if (!(hso->fout = fopen(hso->filename, "wb")))
+      if (!(hso->fout = fopen(hso->outname, "wb")))
       {
         result = ERR_OUTPUT_FILE_OPEN;
       }
@@ -604,14 +674,14 @@ outputstream_ProcessFrame(
           }
 
           // Generate a .TRK file too
-          if (ReplaceFileExtension(hso->filename, hso->filename, NULL, "TRK"))
+          if (ReplaceFileExtension(hso->outname, hso->outname, NULL, "TRK"))
           {
-            hso->ftrk = fopen(hso->filename, "w");
+            hso->ftrk = fopen(hso->outname, "w");
           }
 
-          if (ReplaceFileExtension(hso->filename, hso->filename, NULL, "LVL"))
+          if (ReplaceFileExtension(hso->outname, hso->outname, NULL, "LVL"))
           {
-            hso->flvl = fopen(hso->filename, "wb");
+            hso->flvl = fopen(hso->outname, "wb");
           }
         }
       }
@@ -650,7 +720,7 @@ outputstream_ProcessFrame(
       // in the MPP file. We need to mimic that behavior.
       if ((hso->is_mpp) && (rateid == RATEID_44100) && (framesize == 416))
       {
-        const static BYTE padding[4]; // static, so these are set to 0
+        const static BYTE padding[4] = { 0 };
 
         if (!fwrite(padding, sizeof(padding), 1, hso->fout))
         {
@@ -870,15 +940,25 @@ inputstream_CopyFrame(
     {
       for(;;)
       {
-        result = GetFrameSize(hsi->buffer + hsi->startindex, hsi->endindex - hsi->startindex, &hsi->framesize, &hsi->rateid);
+        UINT skipsize;
 
-        if (result == ERR_SYNC)
+        result = GetFrameSize(hsi->buffer + hsi->startindex, hsi->endindex - hsi->startindex, &hsi->framesize, &skipsize, &hsi->rateid);
+
+        if ( (result == ERR_SYNC)
+          || (result == ERR_DATA_NOT_MPEG1)
+          || (result == ERR_DATA_NOT_LAYER1)
+          || (result == ERR_DATA_NOT_384KBPS)
+          || (result == ERR_DATA_BAD_CHANMODE))
         {
-          // There's extra data between frames, just get the next byte
-          // if possible
-          if (hsi->startindex < hsi->endindex)
+          if (!skipsize)
           {
-            hsi->startindex++;
+            skipsize = 1;
+          }
+
+          // Skip unusable data if possible
+          if ((hsi->startindex + skipsize) <= hsi->endindex)
+          {
+            hsi->startindex += skipsize;
             continue;
           }
           else
@@ -913,7 +993,44 @@ inputstream_CopyFrame(
 
   if (!result)
   {
-    // Call the output callback function to process the frame.
+    // Remove optional CRC
+    if ((hsi->buffer[hsi->startindex + 1] & 0x1) != 0x1)
+    {
+      // Change the header to indicate there's no CRC anymore
+      hsi->buffer[hsi->startindex + 1] |= 0x1;
+
+      // Overwrite the CDC with the data that follows it
+      memmove(hsi->buffer + hsi->startindex + 4, hsi->buffer + hsi->startindex + 6, hsi->framesize - 6);
+
+      // Clear the last two bytes
+      hsi->buffer[hsi->startindex + hsi->framesize - 2] = 0;
+      hsi->buffer[hsi->startindex + hsi->framesize - 1] = 0;
+    }
+  }
+
+  if (!result)
+  {
+    // If there's a padding slot, make sure it doesn't contain any data
+    // if writing to MPP.
+    // The DCC System Description describes padding slots as "dummy",
+    // implying that the slot must be blank.
+    if ((hso->is_mpp) && (hsi->framesize == 420))
+    {
+      DWORD *ppaddingslot = (DWORD *)(hsi->buffer + hsi->startindex + 416);
+
+      // Check if there's any data in the padding slot.
+      if (*ppaddingslot != 0)
+      {
+        hsi->numpaddingslots++;
+      }
+
+      *ppaddingslot = 0;
+    }
+  }
+
+  if (!result)
+  {
+    // Call the output function to process the frame.
     result = outputstream_ProcessFrame(hso, hsi->buffer + hsi->startindex, hsi->framesize, hsi->rateid);
   }
 
@@ -978,7 +1095,7 @@ ProcessFile(
         break;
       }
 
-      for (;;)
+      while (!outresult)
       {
         static UINT32 timestamp;
 
@@ -992,7 +1109,9 @@ ProcessFile(
         if (GetTickCount() - timestamp > 1000)
         {
           timestamp = GetTickCount();
-          fprintf(stderr, "%u frame%s\r", hso->numframes, (hso->numframes == 1 ? "" : "s"));
+          fprintf(stderr, "%u frame%s\r",
+            hso->numframes,
+            (hso->numframes == 1 ? "" : "s"));
         }
       }
 
@@ -1002,7 +1121,10 @@ ProcessFile(
       }
     }
 
-    fprintf(stderr, "%u frame%s DONE\n", hso->numframes, (hso->numframes == 1 ? "" : "s"));
+    fprintf(stderr, "%u frame%s DONE%s\n", 
+      hso->numframes,
+      (hso->numframes == 1 ? "" : "s"),
+      (hsi->numpaddingslots ? " (NOTE: nonzero padding slots detected and cleared)" : ""));
 
     if (inresult)
     {
@@ -1029,8 +1151,8 @@ int main(int argc, char *argv[])
 
   fprintf(stderr, 
     "DCCU File Conversion Utility for DCC-Studio\n"
-    "Version 3.2\n"
-    "(C) 2020 Jac Goudsmit\n"
+    "Version 3.3\n"
+    "(C) 2020-2022 Jac Goudsmit\n"
     "Licensed under the MIT license.\n"
     "\n");
 
@@ -1050,9 +1172,19 @@ int main(int argc, char *argv[])
       "When converting to .MPP, the program also generates a .LVL and a .TRK file.\n"
       "Those are necessary to import the audio into the DCC-Studio. However,\n"
       "because DCCU is not an MP1 decoder, it has to put dummy information into\n"
-      "the .LVL file. As a result is, you won't see the actual audio levels\n"
-      "in the DCC Studio wave editor unless you record the track to tape first,\n"
-      "and then copy it back to hard disk again.\n"
+      "the .LVL file. As a result, you won't see the actual audio levels in the\n"
+      "DCC Studio wave editor unless you record the track to tape first, and\n"
+      "then copy it back to hard disk again.\n"
+      "\n"
+      "When converting a 44.1 kHz .MP1 file to .MPP, the program checks for padding\n"
+      "slots that aren't blank. Padding slots occur in the audio stream because\n"
+      "384000 / 44100 is not an integer. In a 44.1 kHz PASC/MP1 stream, 24 out of\n"
+      "every 49 frames have an extra slot (105 slots instead of 104 slots per\n"
+      "frame). In MP1, that slot may contain audio data, however in PASC the padding\n"
+      "slot is a dummy slot and must be blank to avoid decoding problems. The program\n"
+      "clears the padding slot and notes in the output that it happened, because\n"
+      "the audio data was changed and a minor amount of audio accuracy may have been\n"
+      "lost at the highest frequencies.\n"
       "\n");
 
     result = ERR_COMMAND;
