@@ -76,6 +76,7 @@ typedef enum ERR_t
   ERR_INPUT_FILE_OPEN,                  // Couldn't open input file
   ERR_INPUT_FILE_READ,                  // Error reading input file
   ERR_INPUT_FILE_EOF,                   // End of input file reached
+  ERR_OUTPUT_FILE_EXISTS,               // Output file already exists
   ERR_OUTPUT_FILE_OPEN,                 // Couldn't open output file
   ERR_OUTPUT_FILE_WRITE,                // Error writing output file
 
@@ -113,7 +114,9 @@ typedef struct INPUTSTREAM_t
 
 typedef struct OUTPUTSTREAM_t
 {
-  CHAR              outname[MAX_PATH];  // File name for output
+  CHAR              outname[MAX_PATH];     // MPP/MP1 file name for output
+  CHAR              trkfilename[MAX_PATH]; // TRK file name (long)
+  CHAR              lvlfilename[MAX_PATH]; // LVL file name (short)
   FILE             *fout;               // Output file handle
   FILE             *flvl;               // Level file handle
   FILE             *ftrk;               // Track file handle
@@ -196,11 +199,14 @@ ReplaceFileExtension(
   LPCSTR filename,                      // Input filename
   LPSTR outfilename,                    // Output filename (ok to use input)
   LPCSTR matchext,                      // Input ext must be this (NULL=any)
-  LPCSTR replaceext)                    // Replace with this (NULL=no change)
+  LPCSTR replaceext,                    // Replace with this (NULL=no change)
+  BOOL shorten)                         // Generate short output file name
 {
   BOOL result = TRUE;
   LPCSTR extension = NULL;
-  UINT32 baselen = 0;
+  LPCSTR basename = NULL;
+  UINT32 pathlen = 0;
+  UINT32 basenamelen = 0;
   BOOL haveperiod = FALSE;
 
   if (result)
@@ -214,7 +220,7 @@ ReplaceFileExtension(
 
   if (result)
   {
-    extension = GetFileExtension(filename, NULL);
+    extension = GetFileExtension(filename, &basename);
 
     if (!extension)
     {
@@ -225,6 +231,9 @@ ReplaceFileExtension(
 
   if (result)
   {
+    basenamelen = extension - basename;
+    pathlen = extension - filename;
+
     // Move the extension pointer beyond the period if there is one
     if (*extension == '.')
     {
@@ -232,13 +241,23 @@ ReplaceFileExtension(
       extension++;
     }
 
-    baselen = extension - filename;
+    // If we're shortening the file name and it's too long,
+    // base the calculation on the reduced length
+    if (shorten)
+    {
+      if (basenamelen > 8)
+      {
+        pathlen -= (basenamelen - 8);
+        basenamelen = 8;
+        haveperiod = FALSE; // Force insertion of period
+      }
+    }
 
     if (replaceext)
     {
       // If the replacement extension would make the output file too long,
       // bail out
-      if (baselen + !haveperiod + strlen(replaceext) >= MAX_PATH)
+      if (pathlen + !haveperiod + strlen(replaceext) >= MAX_PATH)
       {
         result = FALSE;
       }
@@ -263,19 +282,39 @@ ReplaceFileExtension(
       // Check if we need to copy the string to the output
       if (filename != outfilename)
       {
-        memcpy(outfilename, filename, baselen);
+        memcpy(outfilename, filename, pathlen);
       }
 
       // Write a period if needed
-      dstex = outfilename + baselen;
-      if (!haveperiod)
-      {
-        *dstex++ = '.';
-      }
+      dstex = outfilename + pathlen;
+      *dstex++ = '.';
 
       // Copy the replacement extension
       // We already checked that there is enough space.
       strcpy(dstex, replaceext); // Safe
+    }
+  }
+
+  return result;
+}
+
+
+//---------------------------------------------------------------------------
+// Check if file exists
+BOOL                                    // Returns nonzero if file exists
+FileExists(
+  LPCSTR filename)                      // File name
+{
+  BOOL result = FALSE;
+
+  if (filename)
+  {
+    FILE *fp = fopen(filename, "r");
+
+    if (fp)
+    {
+      fclose(fp);
+      result = TRUE;
     }
   }
 
@@ -529,15 +568,17 @@ void outputstream_Destroy(
     {
       LPCSTR basename;
       LPCSTR extension = GetFileExtension(hso->outname, &basename);
+      LPCSTR longbasename;
+      LPCSTR longextension = GetFileExtension(hso->trkfilename, &longbasename);
 
-      if (extension)
+      if (extension && longextension)
       {
         UINT namelen = extension - basename;
+        UINT longnamelen = longextension - longbasename;
 
-        if (namelen > 8)
+        if (longnamelen > 40)
         {
-          // TODO: Warning, name is too long
-          //namelen = 8;
+          longnamelen = 40;
         }
 
         fprintf(hso->ftrk,
@@ -563,7 +604,7 @@ void outputstream_Destroy(
           namelen, namelen, basename,   // File name
           hso->numframes,               // Number of frames
           hso->rateid,                  // Sample rate ID
-          namelen, namelen, basename,   // Title (TODO allow specifying from command line)
+          longnamelen, longnamelen, longbasename, // Title (TODO allow specifying from command line)
           hso->numframes                // Number of frames
         );
       }
@@ -585,7 +626,7 @@ void outputstream_Destroy(
 ERR
 outputstream_Create(
   HOUTPUTSTREAM *phso,                  // Ptr to handle; must point to NULL
-  LPCSTR filename,                      // File to open
+  LPCSTR infilename,                      // File to open
   BOOL is_mpp)                          // TRUE=MPP, FALSE=MP1
 {
   ERR result = ERR_OK;
@@ -593,7 +634,7 @@ outputstream_Create(
 
   if (!result)
   {
-    if ((!phso) || (*phso) || (!filename) || (!*filename))
+    if ((!phso) || (*phso) || (!infilename) || (!*infilename))
     {
       result = ERR_PARAMETER;
     }
@@ -609,10 +650,45 @@ outputstream_Create(
 
   if (!result)
   {
-    strncpy(hs->outname, filename, sizeof(hs->outname) - 1); // safe; buffer is filled with \0
     hs->is_mpp = is_mpp;
     hs->rateid = RATEID_UNKNOWN;
     hs->numframes = 0;
+
+    // Generate our file name(s) from the input file name
+    // And check that the output file doesn't exist
+    // TODO: fix copy/paste
+    if (is_mpp)
+    {
+      if ( (!result)
+        && ( (!ReplaceFileExtension(infilename, hs->outname, NULL, "MPP", TRUE))
+          || (FileExists(hs->outname))))
+      {
+        result = ERR_OUTPUT_FILE_EXISTS; // TODO: not always the correct error code
+      }
+
+      if ( (!result)
+        && ( (!ReplaceFileExtension(infilename, hs->trkfilename, NULL, "TRK", FALSE))
+          || (FileExists(hs->trkfilename))))
+      {
+        result = ERR_OUTPUT_FILE_EXISTS; // TODO: not always the correct error code
+      }
+
+      if ( (!result)
+        && ( (!ReplaceFileExtension(infilename, hs->lvlfilename, NULL, "LVL", TRUE))
+          || (FileExists(hs->lvlfilename))))
+      {
+        result = ERR_OUTPUT_FILE_EXISTS; // TODO: not always the correct error code
+      }
+    }
+    else
+    {
+      if ( (!result)
+        && ( (!ReplaceFileExtension(infilename, hs->outname, NULL, "MP1", FALSE))
+          || (FileExists(hs->lvlfilename))))
+      {
+        result = ERR_OUTPUT_FILE_EXISTS; // TODO: not always the correct error code
+      }
+    }
   }
 
   if (phso)
@@ -645,7 +721,7 @@ outputstream_ProcessFrame(
 
   if (!result)
   {
-    // If the file isn't open yet, open it now
+    // If the file(s) isn't/aren't open yet, open it/them now
     if (!hso->fout)
     {
       if (!(hso->fout = fopen(hso->outname, "wb")))
@@ -673,15 +749,24 @@ outputstream_ProcessFrame(
             hso->rateid = rateid;
           }
 
-          // Generate a .TRK file too
-          if (ReplaceFileExtension(hso->outname, hso->outname, NULL, "TRK"))
+          if (!result)
           {
-            hso->ftrk = fopen(hso->outname, "w");
+            // Generate a .TRK file too
+            hso->ftrk = fopen(hso->trkfilename, "w");
+            if (!hso->ftrk)
+            {
+              result = ERR_OUTPUT_FILE_OPEN;
+            }
           }
 
-          if (ReplaceFileExtension(hso->outname, hso->outname, NULL, "LVL"))
+          if (!result)
           {
-            hso->flvl = fopen(hso->outname, "wb");
+            // Generate an LVL file too
+            hso->flvl = fopen(hso->lvlfilename, "wb");
+            if (!hso->flvl)
+            {
+              result = ERR_OUTPUT_FILE_OPEN;
+            }
           }
         }
       }
@@ -1051,7 +1136,6 @@ inputstream_CopyFrame(
 ERR                                     // Returns error code
 ProcessFile(
   LPCSTR infilename,                    // Input file name
-  LPCSTR outfilename,                   // Output file name
   BOOL output_is_mpp)                   // TRUE=Generate MPP file
 {
   ERR result = ERR_OK;
@@ -1060,7 +1144,7 @@ ProcessFile(
 
   if (!result)
   {
-    if ((!infilename) || (!*infilename) || (!outfilename) || (!*outfilename))
+    if ((!infilename) || (!*infilename))
     {
       result = ERR_PARAMETER;
     }
@@ -1073,7 +1157,7 @@ ProcessFile(
 
   if (!result)
   {
-    result = outputstream_Create(&hso, outfilename, output_is_mpp);
+    result = outputstream_Create(&hso, infilename, output_is_mpp);
   }
 
   if (!result)
@@ -1081,7 +1165,7 @@ ProcessFile(
     ERR inresult  = ERR_OK;
     ERR outresult = ERR_OK;
 
-    fprintf(stderr, "%s -> %s\n", infilename, outfilename);
+    fprintf(stderr, "Processing %s\n", infilename);
 
     while ((!inresult) && (!outresult))
     {
@@ -1151,7 +1235,7 @@ int main(int argc, char *argv[])
 
   fprintf(stderr, 
     "DCCU File Conversion Utility for DCC-Studio\n"
-    "Version 3.3\n"
+    "Version 3.4\n"
     "(C) 2020-2022 Jac Goudsmit\n"
     "Licensed under the MIT license.\n"
     "\n");
@@ -1198,7 +1282,6 @@ int main(int argc, char *argv[])
     {
       ERR loopresult = ERR_OK;
       LPCSTR inputfilename = argv[i];
-      char outputfilename[MAX_PATH] = "";
       BOOL output_is_mpp = FALSE;
 
       if (!loopresult)
@@ -1211,26 +1294,36 @@ int main(int argc, char *argv[])
 
       if (!loopresult)
       {
-        if (ReplaceFileExtension(inputfilename, outputfilename, "MP1", "MPP"))
+        LPCSTR extension = GetFileExtension(inputfilename, NULL);
+
+        if (extension)
         {
-          output_is_mpp = TRUE;
-        }
-        else if (ReplaceFileExtension(inputfilename, outputfilename, "MPP", "MP1"))
-        {
-          // Nothing to do
+          if (!stricmp(extension, ".MP1"))
+          {
+            output_is_mpp = TRUE;
+          }
+          else if (!stricmp(extension, ".MPP"))
+          {
+            // Nothing to do
+          }
+          else
+          {
+            // Filename extension not recognized
+            loopresult = ERR_INPUT_FILE_NAME;
+          }
         }
         else
         {
-          // Filename extension not recognized
+          // File name has no extension
           loopresult = ERR_INPUT_FILE_NAME;
         }
       }
 
       if (!loopresult)
       {
-        // We have an input file name and an output file name and we know
+        // We have an input file name and we know
         // if we are creating an MPP file. Let's go!
-        loopresult = ProcessFile(inputfilename, outputfilename, output_is_mpp);
+        loopresult = ProcessFile(inputfilename, output_is_mpp);
       }
 
       if (loopresult)
