@@ -205,8 +205,8 @@ ReplaceFileExtension(
   BOOL result = TRUE;
   LPCSTR extension = NULL;
   LPCSTR basename = NULL;
-  UINT32 pathlen = 0;
-  UINT32 basenamelen = 0;
+  UINT32 dirlen = 0;
+  UINT32 filelen = 0;
   BOOL haveperiod = FALSE;
 
   if (result)
@@ -231,8 +231,9 @@ ReplaceFileExtension(
 
   if (result)
   {
-    basenamelen = extension - basename;
-    pathlen = extension - filename;
+    // Calculate the length of the directory and file name
+    dirlen = basename - filename;
+    filelen = extension - basename; // period excluded
 
     // Move the extension pointer beyond the period if there is one
     if (*extension == '.')
@@ -241,31 +242,6 @@ ReplaceFileExtension(
       extension++;
     }
 
-    // If we're shortening the file name and it's too long,
-    // base the calculation on the reduced length
-    if (shorten)
-    {
-      if (basenamelen > 8)
-      {
-        pathlen -= (basenamelen - 8);
-        basenamelen = 8;
-        haveperiod = FALSE; // Force insertion of period
-      }
-    }
-
-    if (replaceext)
-    {
-      // If the replacement extension would make the output file too long,
-      // bail out
-      if (pathlen + !haveperiod + strlen(replaceext) >= MAX_PATH)
-      {
-        result = FALSE;
-      }
-    }
-  }
-
-  if (result)
-  {
     // If a match string was given, check if the extension matches
     if (matchext)
     {
@@ -275,23 +251,79 @@ ReplaceFileExtension(
 
   if (result)
   {
-    if (replaceext)
+    if (replaceext || shorten)
     {
-      LPSTR dstex;
+      LPSTR t = outfilename + dirlen;
+      LPCSTR s = filename + dirlen;
+      UINT32 i;
 
-      // Check if we need to copy the string to the output
-      if (filename != outfilename)
+      // Copy the directory name (if necessary)
+      if ((filename != outfilename) && (dirlen))
       {
-        memcpy(outfilename, filename, pathlen);
+        memcpy(outfilename, filename, dirlen);
       }
 
-      // Write a period if needed
-      dstex = outfilename + pathlen;
-      *dstex++ = '.';
+      // Copy the file name
+      // If we're in shortening mode, convert to upper case and skip spaces
+      for (i = 0; i < filelen; i++)
+      {
+        char c = *s;
 
-      // Copy the replacement extension
-      // We already checked that there is enough space.
-      strcpy(dstex, replaceext); // Safe
+        if (shorten)
+        {
+          c = toupper(c);
+          if (c == ' ')
+          {
+            s++;
+            i++;
+            continue;
+          }
+        }
+
+        *t++ = c;
+        s++;
+
+        if ((shorten) && (t == outfilename + dirlen + 8))
+        {
+          break;
+        }
+      }
+
+      // Store terminator in case no extension will be added
+      *t = '\0';
+
+      // Choose the extension to copy
+      if ((replaceext) && (*replaceext))
+      {
+        s = replaceext;
+      }
+      else
+      {
+        s = extension;
+      }
+
+      // If there's no extension to append, we're done
+      if (*s)
+      {
+        // We have now copied the directory and the base name of the file.
+        // From this point on we may be making the output longer than
+        // the input. Make sure we don't overrun the buffer.
+        if ((t - outfilename) + 1 + strlen(s) > MAX_PATH - 1)
+        {
+          result = FALSE;
+        }
+        else
+        {
+          *t++ = '.';
+
+          strcpy(t, s); // Safe
+
+          if (shorten)
+          {
+            strupr(t);
+          }
+        }
+      }
     }
   }
 
